@@ -12,3 +12,4 @@ users.json
 users_data.json
 
 .vercel
+.env*
