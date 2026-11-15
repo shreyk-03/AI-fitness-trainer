@@ -3,7 +3,16 @@
   "builds": [
     {
       "src": "web_app.py",
-      "use": "@vercel/python"
+      "use": "@vercel/python",
+      "config": {
+        "includeFiles": [
+          "templates/**",
+          "static/**",
+          "frontend/dist/**",
+          "workout_history.json",
+          "storage.py"
+        ]
+      }
     }
   ],
   "routes": [

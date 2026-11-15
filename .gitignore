@@ -4,9 +4,11 @@ __pycache__/
 instance/
 *.db
 node_modules/
-
-frontend/node_modules/
 .env
 *.log
+
+# Local user data - never commit credentials or personal workout history
+users.json
+users_data.json
 
 .vercel

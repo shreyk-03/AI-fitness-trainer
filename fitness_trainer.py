@@ -7,13 +7,13 @@ import subprocess
 import sys
 import os
 
+APP_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'app.py')
+
 def launch_trainer():
     """Launch the fitness trainer application"""
     try:
-        # Check if fitness_trainer.py exists
-        if not os.path.exists('fitness_trainer.py'):
-            print("❌ Error: fitness_trainer.py not found!")
-            print("Make sure you're in the correct directory (D:\\AI_Trainer)")
+        if not os.path.exists(APP_FILE):
+            print("❌ Error: app.py not found next to fitness_trainer.py!")
             input("Press Enter to exit...")
             return
         
@@ -21,14 +21,7 @@ def launch_trainer():
         print("📹 Make sure your camera is connected!")
         print("\n" + "="*50)
         
-        # Get Python executable
-        python_exe = sys.executable
-        
-        # Launch the trainer
-        if os.name == 'nt':  # Windows
-            subprocess.run([python_exe, 'fitness_trainer.py'])
-        else:  # Linux/Mac
-            subprocess.run([python_exe, 'fitness_trainer.py'])
+        subprocess.run([sys.executable, APP_FILE])
         
     except KeyboardInterrupt:
         print("\n\n✓ Trainer closed by user")

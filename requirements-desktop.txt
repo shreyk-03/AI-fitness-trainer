@@ -1,0 +1,5 @@
+# Desktop trainer only (app.py). Not required by the web app.
+opencv-python
+mediapipe
+numpy
+pyttsx3

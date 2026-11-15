@@ -6,11 +6,114 @@ import numpy as np
 import time
 import json
 import os
-import math
+import hashlib
+import hmac
 import threading
-from datetime import datetime
 import pyttsx3
+from datetime import datetime
 from collections import Counter
+
+HISTORY_PATH = 'workout_history.json'
+USERS_PATH = 'users.json'
+
+# angle landmarks (a, b, c), calorie cost per rep and the angle thresholds that
+# drive rep counting / form warnings for each exercise
+EXERCISE_RULES = {
+    'squat': {
+        'joints': (23, 25, 27),
+        'calories': 0.5,
+        'rest_stage': 'up',
+        'rest_when': lambda angle: angle > 160,
+        'rep_stage': 'up',
+        'rep_next': 'down',
+        'rep_when': lambda angle: angle < 90,
+        'warn_stage': 'up',
+        'warn_when': lambda angle: 100 < angle < 130,
+        'warn_issue': 'Depth Limit',
+        'warn_hint': 'Go Lower!',
+        'idle_hint': 'Ready',
+    },
+    'pushup': {
+        'joints': (11, 13, 15),
+        'calories': 0.35,
+        'rest_stage': 'up',
+        'rest_when': lambda angle: angle > 160,
+        'rep_stage': 'up',
+        'rep_next': 'down',
+        'rep_when': lambda angle: angle < 90,
+        'warn_stage': 'up',
+        'warn_when': lambda angle: 100 < angle < 130,
+        'warn_issue': 'Half Rep',
+        'warn_hint': 'Chest Lower!',
+        'idle_hint': 'Ready',
+    },
+    'bicep_curl': {
+        'joints': (11, 13, 15),
+        'calories': 0.25,
+        'rest_stage': 'down',
+        'rest_when': lambda angle: angle > 160,
+        'rep_stage': 'down',
+        'rep_next': 'up',
+        'rep_when': lambda angle: angle < 35,
+        'warn_stage': 'up',
+        'warn_when': lambda angle: angle > 140,
+        'warn_issue': 'Extension',
+        'warn_hint': 'Full Extension!',
+        'idle_hint': 'Ready',
+    },
+    'shoulder_press': {
+        'joints': (11, 13, 15),
+        'calories': 0.4,
+        'rest_stage': 'down',
+        'rest_when': lambda angle: angle < 90,
+        'rep_stage': 'down',
+        'rep_next': 'up',
+        'rep_when': lambda angle: angle > 160,
+        'warn_stage': 'down',
+        'warn_when': lambda angle: 120 < angle < 150,
+        'warn_issue': 'Range of Motion',
+        'warn_hint': 'Push Higher!',
+        'idle_hint': 'Ready',
+    },
+    'lunge': {
+        'joints': (23, 25, 27),
+        'calories': 0.6,
+        'rest_stage': 'up',
+        'rest_when': lambda angle: angle > 160,
+        'rep_stage': 'up',
+        'rep_next': 'down',
+        'rep_when': lambda angle: angle < 100,
+        'warn_stage': 'up',
+        'warn_when': lambda angle: 110 < angle < 130,
+        'warn_issue': 'Depth',
+        'warn_hint': 'Drop Knee Lower!',
+        'idle_hint': 'Step Back',
+    },
+}
+
+
+def load_history():
+    if not os.path.exists(HISTORY_PATH):
+        return []
+    try:
+        with open(HISTORY_PATH, 'r', encoding='utf-8') as handle:
+            data = json.load(handle)
+    except (OSError, ValueError):
+        return []
+    return data if isinstance(data, list) else []
+
+
+def hash_password(password, salt=None):
+    salt = salt or os.urandom(16)
+    digest = hashlib.pbkdf2_hmac('sha256', password.encode('utf-8'), salt, 100_000)
+    return salt.hex(), digest.hex()
+
+
+def as_number(value):
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return 0.0
 
 
 class InteractiveFitnessTrainer:
@@ -46,12 +149,7 @@ class InteractiveFitnessTrainer:
         self.mistake_history = []
         self.last_error_time = 0
         self.final_report = ""
-        
-        self.calories_map = {
-            "squat": 0.5, "pushup": 0.35, "bicep_curl": 0.25,
-            "shoulder_press": 0.4, "lunge": 0.6
-        }
-        
+
         # Premium Color Palette (BGR)
         self.colors = {
             "bg": (16, 11, 10),
@@ -71,11 +169,6 @@ class InteractiveFitnessTrainer:
         self.mouse_x = 0; self.mouse_y = 0
 
     def speak(self, text, force=False):
-        # If a coach is hired, prefix feedback with their persona
-        if self.coach_name and "Starting" not in text and "Welcome" not in text:
-            # Random chance to add coach flavor could be added here
-            pass
-
         if force or (time.time() - self.last_speech > self.speech_cooldown):
             self.last_speech = time.time()
             threading.Thread(target=lambda: self._speak_thread(text), daemon=True).start()
@@ -108,54 +201,28 @@ class InteractiveFitnessTrainer:
         return angle
 
     # --- EXERCISE LOGIC ---
-    def check_squat(self, lm):
-        angle = self.calculate_angle([lm[23].x,lm[23].y], [lm[25].x,lm[25].y], [lm[27].x,lm[27].y])
-        if angle > 160: self.stage = "up"; self.feedback = "Ready"
-        if angle < 90 and self.stage == "up":
-            self.stage="down"; self.counter+=1; self.rep_animation=30; self.total_calories+=0.5
-            self.speak(str(self.counter), True)
-        elif angle < 130 and angle > 100 and self.stage == "up":
-            self.log_error("Depth Limit", "Go Lower!")
-        return angle
+    def check_rep(self, lm):
+        rule = EXERCISE_RULES[self.exercise]
+        first, middle, last = rule['joints']
+        angle = self.calculate_angle(
+            [lm[first].x, lm[first].y],
+            [lm[middle].x, lm[middle].y],
+            [lm[last].x, lm[last].y],
+        )
 
-    def check_pushup(self, lm):
-        angle = self.calculate_angle([lm[11].x,lm[11].y], [lm[13].x,lm[13].y], [lm[15].x,lm[15].y])
-        if angle > 160: self.stage = "up"; self.feedback = "Ready"
-        if angle < 90 and self.stage == "up":
-            self.stage="down"; self.counter+=1; self.rep_animation=30; self.total_calories+=0.35
-            self.speak(str(self.counter), True)
-        elif angle < 130 and angle > 100 and self.stage == "up":
-            self.log_error("Half Rep", "Chest Lower!")
-        return angle
+        if rule['rest_when'](angle):
+            self.stage = rule['rest_stage']
+            self.feedback = rule['idle_hint']
 
-    def check_curl(self, lm):
-        angle = self.calculate_angle([lm[11].x,lm[11].y], [lm[13].x,lm[13].y], [lm[15].x,lm[15].y])
-        if angle > 160: self.stage = "down"; self.feedback = "Ready"
-        if angle < 35 and self.stage == "down":
-            self.stage="up"; self.counter+=1; self.rep_animation=30; self.total_calories+=0.25
+        if rule['rep_when'](angle) and self.stage == rule['rep_stage']:
+            self.stage = rule['rep_next']
+            self.counter += 1
+            self.rep_animation = 30
+            self.total_calories += rule['calories']
             self.speak(str(self.counter), True)
-        elif angle > 140 and self.stage == "up":
-            self.log_error("Extension", "Full Extension!")
-        return angle
-        
-    def check_press(self, lm):
-        angle = self.calculate_angle([lm[11].x,lm[11].y], [lm[13].x,lm[13].y], [lm[15].x,lm[15].y])
-        if angle < 90: self.stage = "down"; self.feedback = "Ready"
-        if angle > 160 and self.stage == "down":
-            self.stage="up"; self.counter+=1; self.rep_animation=30; self.total_calories+=0.4
-            self.speak(str(self.counter), True)
-        elif angle > 120 and angle < 150 and self.stage == "down":
-            self.log_error("Range of Motion", "Push Higher!")
-        return angle
+        elif rule['warn_when'](angle) and self.stage == rule['warn_stage']:
+            self.log_error(rule['warn_issue'], rule['warn_hint'])
 
-    def check_lunge(self, lm):
-        angle = self.calculate_angle([lm[23].x,lm[23].y], [lm[25].x,lm[25].y], [lm[27].x,lm[27].y])
-        if angle > 160: self.stage = "up"; self.feedback = "Step Back"
-        if angle < 100 and self.stage == "up":
-            self.stage="down"; self.counter+=1; self.rep_animation=30; self.total_calories+=0.6
-            self.speak(str(self.counter), True)
-        elif angle < 130 and angle > 110 and self.stage == "up":
-            self.log_error("Depth", "Drop Knee Lower!")
         return angle
 
     # --- UI DRAWING ---
@@ -283,7 +350,8 @@ class InteractiveFitnessTrainer:
         return report
 
     def save_session(self):
-        duration = int(time.time() - self.workout_start_time)
+        started = self.workout_start_time or time.time()
+        duration = int(time.time() - started)
         top_issue = Counter(self.mistake_history).most_common(1)[0][0] if self.mistake_history else "None"
         entry = {
             "username": self.username,
@@ -295,13 +363,10 @@ class InteractiveFitnessTrainer:
             "duration": f"{duration//60}m {duration%60}s",
             "feedback": top_issue
         }
-        history = []
-        if os.path.exists('workout_history.json'):
-            try:
-                with open('workout_history.json', 'r') as f: history = json.load(f)
-            except: pass
+        history = load_history()
         history.append(entry)
-        with open('workout_history.json', 'w') as f: json.dump(history, f, indent=2)
+        with open(HISTORY_PATH, 'w', encoding='utf-8') as handle:
+            json.dump(history, handle, indent=2)
 
     def start(self):
         cap = cv2.VideoCapture(0, cv2.CAP_DSHOW)
@@ -356,11 +421,7 @@ class InteractiveFitnessTrainer:
                 )
                 
                 lm = results.pose_landmarks.landmark
-                if self.exercise == "squat": self.check_squat(lm)
-                elif self.exercise == "pushup": self.check_pushup(lm)
-                elif self.exercise == "bicep_curl": self.check_curl(lm)
-                elif self.exercise == "shoulder_press": self.check_press(lm)
-                elif self.exercise == "lunge": self.check_lunge(lm)
+                self.check_rep(lm)
 
             self.draw_interactive_ui(image)
             cv2.imshow('AI Fitness Trainer Pro', image)
@@ -436,21 +497,37 @@ class FitnessApp:
         else: messagebox.showerror("Error", "Invalid Username or Password")
 
     def register(self):
-        user = self.entry_user.get(); pwd = self.entry_pass.get()
+        user = self.entry_user.get().strip(); pwd = self.entry_pass.get()
         if not user or not pwd: messagebox.showwarning("Input", "Please fill all fields"); return
         users = self.load_users()
-        if user in users: messagebox.showerror("Error", "User already exists")
-        else:
-            users[user] = pwd; self.save_users(users); messagebox.showinfo("Success", "Account created! Please Login.")
+        if user in users:
+            messagebox.showerror("Error", "User already exists")
+            return
+        salt, digest = hash_password(pwd)
+        users[user] = {'salt': salt, 'hash': digest}
+        self.save_users(users)
+        messagebox.showinfo("Success", "Account created! Please Login.")
 
     def load_users(self):
-        if os.path.exists("users.json"):
-            with open("users.json", "r") as f: return json.load(f)
-        return {}
+        if not os.path.exists(USERS_PATH):
+            return {}
+        try:
+            with open(USERS_PATH, 'r', encoding='utf-8') as handle:
+                users = json.load(handle)
+        except (OSError, ValueError):
+            return {}
+        return users if isinstance(users, dict) else {}
+
     def save_users(self, data):
-        with open("users.json", "w") as f: json.dump(data, f)
+        with open(USERS_PATH, 'w', encoding='utf-8') as handle:
+            json.dump(data, handle, indent=2)
+
     def verify_user(self, user, pwd):
-        users = self.load_users(); return user in users and users[user] == pwd
+        record = self.load_users().get(user)
+        if not isinstance(record, dict) or 'salt' not in record:
+            return False
+        _, digest = hash_password(pwd, bytes.fromhex(record['salt']))
+        return hmac.compare_digest(digest, record.get('hash', ''))
 
     # --- SCREEN 2: DASHBOARD ---
     def show_dashboard(self):
@@ -525,24 +602,27 @@ class FitnessApp:
         tk.Label(frame, text=title, bg=color, fg="white", font=("Arial", 10)).pack(pady=(20, 5))
         tk.Label(frame, text=value, bg=color, fg="white", font=("Arial", 20, "bold")).pack()
 
+    def user_history(self):
+        return [entry for entry in load_history() if entry.get("username") == self.current_user]
+
     def get_user_stats(self):
         reps = 0; cals = 0
-        if os.path.exists("workout_history.json"):
-            with open("workout_history.json", "r") as f:
-                data = json.load(f)
-                for entry in data:
-                    if entry.get("username") == self.current_user:
-                        reps += entry.get("reps", 0); cals += entry.get("calories", 0)
+        for entry in self.user_history():
+            reps += int(as_number(entry.get("reps")))
+            cals += as_number(entry.get("calories"))
         return reps, cals
 
     def load_history_table(self):
         for i in self.tree.get_children(): self.tree.delete(i)
-        if os.path.exists("workout_history.json"):
-            with open("workout_history.json", "r") as f:
-                data = json.load(f)
-                user_data = [d for d in data if d.get("username") == self.current_user]
-                for entry in reversed(user_data):
-                    self.tree.insert("", "end", values=(entry.get("date"), entry.get("coach", "AI"), entry.get("exercise").title(), entry.get("reps"), entry.get("feedback", "None")))
+        for entry in reversed(self.user_history()):
+            exercise = str(entry.get("exercise") or "unknown").replace('_', ' ').title()
+            self.tree.insert("", "end", values=(
+                entry.get("date", ""),
+                entry.get("coach", "AI"),
+                exercise,
+                entry.get("reps", 0),
+                entry.get("feedback", "None"),
+            ))
 
     def launch_camera(self):
         self.root.withdraw()

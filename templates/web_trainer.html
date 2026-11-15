@@ -2,6 +2,8 @@
 
 {% block title %}AI Vision Trainer - FitLynx AI{% endblock %}
 
+{% block navbar %}{% endblock %}
+
 {% block extra_css %}
 <style>
     .container {
@@ -9,9 +11,10 @@
         padding: 0 !important;
         margin: 0 !important;
     }
+    body { overflow: hidden; }
     .iframe-wrapper {
         width: 100%;
-        height: calc(100vh - 80px);
+        height: 100vh;
         overflow: hidden;
     }
     iframe {
